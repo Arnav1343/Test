@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+downloads/
+*.mp3
+.env
+venv/
+.venv/
+node_modules/
+.DS_Store
+Thumbs.db
+*.egg-info/
+dist/
+build/
+.cache/
