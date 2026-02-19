@@ -20,7 +20,7 @@
     let wheelAngle = 0; // tracks rotation for highlight ring
 
     /* ── theme ── */
-    const themes = ['default', 'charcoal', 'neon', 'purple', 'deeppurple'];
+    const themes = ['default', 'charcoal', 'neon', 'purple', 'deeppurple', 'light', 'light-rose', 'light-mint'];
     let themeIdx = 0;
 
     /* ── vibration helper ── */
@@ -99,8 +99,12 @@
         } else if (currentView === 'library') {
             for (let i = 0; i < skip; i++) dir > 0 ? libDown() : libUp();
         } else if (currentView === 'nowplaying') {
-            audio.volume = Math.max(0, Math.min(1, audio.volume + dir * -0.05));
-            showToast('Vol: ' + Math.round(audio.volume * 100) + '%');
+            // Seek playback by 5s per tick (scaled by scroll velocity)
+            if (audio.duration) {
+                const seekAmt = dir * 5 * Math.max(1, Math.floor(scrollVelocity));
+                audio.currentTime = Math.max(0, Math.min(audio.duration, audio.currentTime + seekAmt));
+                showToast(fmtDur(Math.floor(audio.currentTime)) + ' / ' + fmtDur(Math.floor(audio.duration)));
+            }
         }
     }
 
@@ -175,6 +179,10 @@
         currentView = name;
         if (name === 'library') loadLibrary();
         if (name === 'search') setTimeout(() => $('searchInput').focus(), 100);
+        // Auto-load last downloaded song when entering Now Playing with nothing loaded
+        if (name === 'nowplaying' && currentTrackIdx < 0 && library.length > 0) {
+            playLastDownloaded();
+        }
     }
 
     /* ── menu ── */
@@ -528,7 +536,22 @@
         if (audio.src && audio.src !== window.location.href) {
             audio.paused ? audio.play() : audio.pause();
             renderLibrary();
+        } else {
+            // Nothing loaded — play last downloaded song
+            playLastDownloaded();
         }
+    }
+
+    async function playLastDownloaded() {
+        if (!library.length) await loadLibrary();
+        if (!library.length) { showToast('No songs yet'); return; }
+        currentTrackIdx = 0; // most recent (sorted by lastModified desc)
+        libIndex = 0;
+        const song = library[0];
+        audio.src = `/api/music/${encodeURIComponent(song.filename)}`;
+        audio.play();
+        updateNowPlaying();
+        if (currentView !== 'nowplaying') showView('nowplaying');
     }
 
     function prevTrack() {
@@ -588,16 +611,17 @@
     });
 
     /* ────────── THEMES ────────── */
-    $('themeCycle').addEventListener('click', () => {
-        themeIdx = (themeIdx + 1) % themes.length;
-        applyTheme();
-        showToast(themes[themeIdx].charAt(0).toUpperCase() + themes[themeIdx].slice(1));
-    });
+    const themeNames = {
+        'default': 'Pink Dark', 'charcoal': 'Charcoal', 'neon': 'Neon',
+        'purple': 'Purple', 'deeppurple': 'Deep Purple',
+        'light': 'Light', 'light-rose': 'Rose Light', 'light-mint': 'Mint Light'
+    };
 
-    $('themeToggle').addEventListener('click', () => {
-        // Legacy toggle — just cycle
+    $('themeCycle').addEventListener('click', () => {
+        vib(15);
         themeIdx = (themeIdx + 1) % themes.length;
         applyTheme();
+        showToast(themeNames[themes[themeIdx]] || themes[themeIdx]);
     });
 
     function applyTheme() {
