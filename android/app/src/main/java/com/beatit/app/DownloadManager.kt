@@ -52,6 +52,9 @@ class DownloadManager(
     }
 
     private fun runDownload(taskId: String, videoUrl: String, title: String, quality: Int, codec: String) {
+        val extension = if (codec == "opus") "opus" else "mp3"
+        val finalFile = File(musicDir, "${sanitize(title)}.$extension")
+        val tempFile = File(musicDir, "${sanitize(title)}.$extension.tmp")
         try {
             // Step 1: Get audio stream URL (may be instant if pre-fetched)
             tasks[taskId] = TaskStatus("extracting", 0)
@@ -60,24 +63,25 @@ class DownloadManager(
                 throw IOException(streamError ?: "Could not get audio stream URL")
             }
 
-            // Step 2: Download audio with 64KB buffer
+            // Step 2: Download audio to temp file (won't show in library)
             tasks[taskId] = TaskStatus("downloading", 5)
-            val extension = if (codec == "opus") "opus" else "mp3"
-            val outputFile = File(musicDir, "${sanitize(title)}.$extension")
-            downloadWithProgress(streamUrl, outputFile, taskId)
+            downloadWithProgress(streamUrl, tempFile, taskId)
 
-            // Step 3: Done
-            val sizeHuman = humanSize(outputFile.length())
+            // Step 3: Move temp file to final location (now it appears in library)
+            tempFile.renameTo(finalFile)
+
+            val sizeHuman = humanSize(finalFile.length())
             tasks[taskId] = TaskStatus(
                 status = "done",
                 percent = 100,
                 result = mapOf(
-                    "filename" to outputFile.name,
+                    "filename" to finalFile.name,
                     "title" to title,
                     "size_human" to sizeHuman
                 )
             )
         } catch (e: Exception) {
+            tempFile.delete() // Clean up partial download
             tasks[taskId] = TaskStatus("error", error = e.message ?: "Unknown error")
         }
     }
