@@ -4,11 +4,13 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 
 class MusicServerService : Service() {
 
     private var server: BeatItServer? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -16,12 +18,24 @@ class MusicServerService : Service() {
         super.onCreate()
         createNotificationChannel()
         startForeground(1, buildNotification("BeatIt is running"))
+
+        // Acquire a partial wake lock so downloads don't stall when screen is off
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BeatIt::DownloadLock")
+        wakeLock?.acquire()
+
         server = BeatItServer(this, 8080)
         server?.start()
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // If the system kills and restarts, keep the service running
+        return START_STICKY
+    }
+
     override fun onDestroy() {
         server?.stop()
+        wakeLock?.let { if (it.isHeld) it.release() }
         super.onDestroy()
     }
 

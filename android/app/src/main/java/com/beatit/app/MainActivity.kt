@@ -1,5 +1,7 @@
 package com.beatit.app
 
+import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.webkit.*
 import android.app.Activity
@@ -7,21 +9,18 @@ import android.app.Activity
 class MainActivity : Activity() {
 
     private lateinit var webView: WebView
-    private var server: BeatItServer? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Start the local HTTP server on a background thread
-        Thread {
-            try {
-                server = BeatItServer(this, 8080)
-                server?.start()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }.start()
+        // Start the foreground service (keeps server + downloads alive in background)
+        val serviceIntent = Intent(this, MusicServerService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent)
+        } else {
+            startService(serviceIntent)
+        }
 
         webView = findViewById(R.id.webView)
         setupWebView()
@@ -66,8 +65,8 @@ class MainActivity : Activity() {
         }
     }
 
+    // Don't stop the service on destroy — let it keep running for downloads
     override fun onDestroy() {
-        try { server?.stop() } catch (_: Exception) {}
         super.onDestroy()
     }
 }
