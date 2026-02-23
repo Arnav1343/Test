@@ -1627,3 +1627,128 @@ body {
     opacity: 1;
   }
 }
+
+/* ─── Import View ────────────────────────────────────────────── */
+#viewImport {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+#importInput {
+  width: 100%;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  color: var(--text-primary);
+  padding: 10px 12px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: all 0.15s;
+  box-sizing: border-box;
+}
+
+#importInput:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(74, 163, 255, 0.2);
+}
+
+#importInput::placeholder {
+  color: var(--text-muted);
+}
+
+.import-instructions {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.4;
+  padding: 0 8px;
+}
+
+#importSubmitBtn {
+  width: 100%;
+  margin-top: 4px;
+}
+
+/* ─── Batches List ───────────────────────────────────────────── */
+.batch-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.batch-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--divider);
+  cursor: pointer;
+}
+
+.batch-item:last-child {
+  border-bottom: none;
+}
+
+.batch-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.batch-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.batch-item-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.batch-item-arrow {
+  color: var(--text-muted);
+  font-size: 16px;
+  margin-left: 8px;
+}
+
+/* ─── Batch Detail ───────────────────────────────────────────── */
+.batch-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0 10px;
+  border-bottom: 1px solid var(--divider);
+  margin-bottom: 6px;
+}
+
+.batch-detail-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.batch-detail-stats {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.batch-track-list {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ─── Action Menu ────────────────────────────────────────────── */
+.menu-header {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--divider);
+  margin-bottom: 4px;
+}
