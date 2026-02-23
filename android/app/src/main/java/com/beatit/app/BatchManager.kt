@@ -9,57 +9,46 @@ import kotlinx.coroutines.sync.Semaphore
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
-import java.io.BufferedOutputStream
 import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.math.min
-import kotlin.math.pow
 
+/**
+ * Optimized batch download pipeline with:
+ * - 8 concurrent downloads (adaptive: drops to 3 on rate-limit, ramps back up)
+ * - IDM-style segmented downloads via SegmentedDownloader
+ * - Pre-fetch stream URLs for next 5 tracks while downloading
+ * - Piped instance fallback via YoutubeHelper
+ * - Request spacing to avoid burst patterns
+ */
 object BatchManager {
     private const val TAG = "BatchManager"
-    private const val MAX_CONCURRENT_DOWNLOADS = 5
+    private const val MAX_CONCURRENT = 8
+    private const val MIN_CONCURRENT = 2
     private const val MAX_RETRIES = 3
     private const val HEALTH_CHECK_INTERVAL_MS = 60_000L
-    private const val DEBOUNCE_INTERVAL_MS = 300L
-    private const val WATCHDOG_TIMEOUT_MS = 45_000L
+    private const val WATCHDOG_TIMEOUT_MS = 90_000L  // Longer for segmented downloads
+    private const val REQUEST_SPACING_MS = 250L  // Delay between starting new downloads
 
-    private val executor = Executors.newFixedThreadPool(MAX_CONCURRENT_DOWNLOADS)
+    private val executor = Executors.newFixedThreadPool(MAX_CONCURRENT)
     private val activeWorkerCount = AtomicInteger(0)
     private val mutex = Mutex()
 
+    // Adaptive concurrency control
+    private var currentMaxConcurrent = MAX_CONCURRENT
     private var isRecovering = false
     private var globalRateLimitUntil = 0L
     private var globalConsecutive429s = 0
+    private var lastSuccessTime = 0L
 
     private val trackWatchdogs = ConcurrentHashMap<String, Long>()
-    private val lastProgressBytes = ConcurrentHashMap<String, Long>()
-    private val emaSpeeds = ConcurrentHashMap<String, Double>()
 
     private lateinit var dao: BatchDao
     private lateinit var youtubeHelper: YoutubeHelper
     private lateinit var musicDir: File
-    
-    // Optimized HTTP client: HTTP/2, connection pooling, large timeouts
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .retryOnConnectionFailure(true)
-        .addInterceptor { chain ->
-            val request = chain.request().newBuilder()
-                .header("Accept-Encoding", "identity")
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
-                .build()
-            chain.proceed(request)
-        }
-        .build()
 
     fun init(context: Context, musicDir: File) {
         val database = AppDatabase.getDatabase(context)
@@ -71,6 +60,19 @@ object BatchManager {
             while (true) {
                 delay(HEALTH_CHECK_INTERVAL_MS)
                 runHealthMonitor()
+            }
+        }
+
+        // Adaptive ramp-up: gradually increase concurrency after sustained success
+        CoroutineScope(Dispatchers.Default).launch {
+            while (true) {
+                delay(30_000)
+                if (currentMaxConcurrent < MAX_CONCURRENT && 
+                    globalConsecutive429s == 0 &&
+                    System.currentTimeMillis() - lastSuccessTime < 60_000) {
+                    currentMaxConcurrent = (currentMaxConcurrent + 1).coerceAtMost(MAX_CONCURRENT)
+                    Log.d(TAG, "📈 Ramping up concurrency to $currentMaxConcurrent")
+                }
             }
         }
 
@@ -86,13 +88,13 @@ object BatchManager {
                     continue
                 }
 
-                if (activeWorkerCount.get() >= MAX_CONCURRENT_DOWNLOADS || isRecovering) {
+                if (activeWorkerCount.get() >= currentMaxConcurrent || isRecovering) {
                     delay(500)
                     continue
                 }
 
                 dispatchNextIfPossible()
-                delay(300)  // Faster dispatch polling
+                delay(REQUEST_SPACING_MS)  // Spacing between dispatches
             }
         }
     }
@@ -104,13 +106,39 @@ object BatchManager {
                 
                 if (nextTrack.status != TrackStatus.QUEUED) return@launch
                 
-                transitionInternal(nextTrack, TrackStatus.DISPATCHING)
+                nextTrack.status = TrackStatus.DISPATCHING
+                nextTrack.updatedAt = System.currentTimeMillis()
                 dao.updateTrack(nextTrack)
                 
                 activeWorkerCount.incrementAndGet()
+                
+                // Pre-fetch stream URLs for the NEXT tracks while this one downloads
+                prefetchUpcoming()
+                
                 executor.submit {
                     runWorker(nextTrack.id)
                 }
+            }
+        }
+    }
+
+    /**
+     * Pre-fetch stream URLs for the next 5 queued tracks.
+     * This runs in background so by the time a track starts downloading,
+     * its stream URL is already cached.
+     */
+    private fun prefetchUpcoming() {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val upcoming = dao.getQueuedTracks().take(5)
+                for (track in upcoming) {
+                    val videoUrl = track.youtubeVideoId ?: continue
+                    if (!youtubeHelper.isPrefetched(videoUrl)) {
+                        youtubeHelper.prefetchStreamInfo(videoUrl)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Prefetch failed: ${e.message}")
             }
         }
     }
@@ -122,26 +150,44 @@ object BatchManager {
         }
 
         try {
-            runBlocking { transition(track.id, TrackStatus.DOWNLOADING) }
+            track.status = TrackStatus.DOWNLOADING
+            track.updatedAt = System.currentTimeMillis()
+            runBlocking { dao.updateTrack(track) }
             
             val videoUrl = track.youtubeVideoId ?: throw IOException("No Video ID")
-            Log.d(TAG, "Extracting stream for: ${track.title} (${videoUrl})")
+            Log.d(TAG, "⬇ Downloading: ${track.title}")
             val (streamUrl, streamError) = youtubeHelper.getAudioStreamUrl(videoUrl)
             
             if (streamUrl == null) throw IOException(streamError ?: "Stream extraction failed")
 
-            val extension = "mp3"
+            val extension = "opus"  // Native format, no transcoding needed
             val finalFile = File(musicDir, "${sanitize(track.title)}.$extension")
             val tempFile = File(musicDir, "${sanitize(track.title)}.$extension.tmp")
             track.outputFilePath = finalFile.absolutePath
             
-            Log.d(TAG, "Starting download: ${track.title}")
-            downloadWithProgress(streamUrl, tempFile, track)
+            // Use segmented downloader for maximum speed
+            runBlocking {
+                SegmentedDownloader.download(streamUrl, tempFile) { progress ->
+                    track.totalBytes = progress.totalBytes
+                    track.bytesDownloaded = progress.downloadedBytes
+                    trackWatchdogs[track.id] = System.currentTimeMillis()
+                    runBlocking { dao.updateTrack(track) }
+                }
+            }
             
             if (tempFile.renameTo(finalFile)) {
-                runBlocking { transition(track.id, TrackStatus.COMPLETED) }
+                track.status = TrackStatus.COMPLETED
+                track.updatedAt = System.currentTimeMillis()
+                runBlocking { dao.updateTrack(track) }
+                runBlocking { updateBatchState(track.batchId) }
                 globalConsecutive429s = 0
+                lastSuccessTime = System.currentTimeMillis()
                 Log.d(TAG, "✓ Completed: ${track.title}")
+                
+                // Ramp up if we've been stable
+                if (currentMaxConcurrent < MAX_CONCURRENT) {
+                    currentMaxConcurrent = (currentMaxConcurrent + 1).coerceAtMost(MAX_CONCURRENT)
+                }
             } else {
                 throw IOException("Failed to rename temp file")
             }
@@ -150,82 +196,40 @@ object BatchManager {
         } finally {
             activeWorkerCount.decrementAndGet()
             trackWatchdogs.remove(track.id)
-            lastProgressBytes.remove(track.id)
-            emaSpeeds.remove(track.id)
         }
     }
 
     private fun handleWorkerFailure(track: Track, e: Exception) {
         val msg = e.message ?: "Unknown error"
-        Log.e(TAG, "Worker failed for ${track.title}: $msg")
+        Log.e(TAG, "✗ Failed: ${track.title}: $msg")
         
         if (msg.contains("429") || msg.contains("403")) {
             globalConsecutive429s++
-            val cooldown = if (globalConsecutive429s == 1) 30_000L else 60_000L
+            // Adaptive: reduce concurrency on rate limit
+            currentMaxConcurrent = (currentMaxConcurrent / 2).coerceAtLeast(MIN_CONCURRENT)
+            val cooldown = when {
+                globalConsecutive429s <= 1 -> 15_000L  // 15s first time
+                globalConsecutive429s <= 3 -> 30_000L  // 30s
+                else -> 60_000L                        // 60s
+            }
             globalRateLimitUntil = System.currentTimeMillis() + cooldown
-            Log.w(TAG, "Rate limit hit. Cooling down for ${cooldown/1000}s")
+            Log.w(TAG, "⚠ Rate limit! Concurrency → $currentMaxConcurrent, cooldown ${cooldown/1000}s")
         }
 
         track.retryCount++
         track.errorCode = msg
         runBlocking {
             if (track.retryCount < MAX_RETRIES) {
-                transition(track.id, TrackStatus.QUEUED)
+                track.status = TrackStatus.QUEUED
+                track.updatedAt = System.currentTimeMillis()
+                dao.updateTrack(track)
             } else {
-                transition(track.id, TrackStatus.FAILED)
+                track.status = TrackStatus.FAILED
+                track.updatedAt = System.currentTimeMillis()
+                dao.updateTrack(track)
             }
+            updateBatchState(track.batchId)
         }
-    }
-
-    /**
-     * Optimized download with 256KB buffer, BufferedOutputStream, and throttled progress updates.
-     */
-    private fun downloadWithProgress(url: String, dest: File, track: Track) {
-        val request = Request.Builder().url(url).build()
-        val response = httpClient.newCall(request).execute()
-        if (!response.isSuccessful) {
-            if (response.code == 429 || response.code == 403) throw IOException("HTTP ${response.code}")
-            throw IOException("Download failed: ${response.code}")
-        }
-        
-        val body = response.body ?: throw IOException("Empty body")
-        track.totalBytes = body.contentLength()
-        
-        var lastWriteTime = System.currentTimeMillis()
-
-        BufferedOutputStream(FileOutputStream(dest), 262144).use { out ->
-            body.byteStream().use { input ->
-                val buffer = ByteArray(262144)  // 256KB buffer
-                var downloaded = 0L
-                var read: Int
-                while (input.read(buffer).also { read = it } != -1) {
-                    out.write(buffer, 0, read)
-                    downloaded += read
-                    
-                    track.bytesDownloaded = downloaded
-                    trackWatchdogs[track.id] = System.currentTimeMillis()
-                    
-                    // Throttled progress update (every 300ms)
-                    val now = System.currentTimeMillis()
-                    if (now - lastWriteTime > DEBOUNCE_INTERVAL_MS) {
-                        calculateEmaSpeed(track, downloaded, now - lastWriteTime)
-                        runBlocking { dao.updateTrack(track) }
-                        lastWriteTime = now
-                    }
-                }
-            }
-        }
-        // Final flush
-        runBlocking { dao.updateTrack(track) }
-    }
-
-    private fun calculateEmaSpeed(track: Track, currentBytes: Long, deltaMs: Long) {
-        val lastBytes = lastProgressBytes[track.id] ?: 0L
-        val instantSpeed = (currentBytes - lastBytes).toDouble() / (deltaMs / 1000.0)
-        val prevEma = emaSpeeds[track.id] ?: instantSpeed
-        val newEma = (instantSpeed * 0.3) + (prevEma * 0.7)
-        emaSpeeds[track.id] = newEma
-        lastProgressBytes[track.id] = currentBytes
     }
 
     // ── Internal Helpers ──────────────────────────────────────────
@@ -237,8 +241,14 @@ object BatchManager {
                 try {
                     val stalled = dao.getStalledTracks()
                     stalled.forEach { track ->
-                        track.outputFilePath?.let { File(it).delete() }
-                        transitionInternal(track, TrackStatus.QUEUED)
+                        track.outputFilePath?.let { path ->
+                            File(path).delete()
+                            File("$path.tmp").delete()
+                            // Clean up segment files
+                            for (i in 0..3) File("$path.tmp.seg$i").delete()
+                        }
+                        track.status = TrackStatus.QUEUED
+                        track.updatedAt = System.currentTimeMillis()
                         dao.updateTrack(track)
                     }
                 } catch (e: Exception) {
@@ -256,44 +266,21 @@ object BatchManager {
         trackWatchdogs.forEach { (id, lastTime) ->
             if (now - lastTime > WATCHDOG_TIMEOUT_MS) {
                 Log.w(TAG, "Watchdog timeout for track $id. Requeuing.")
-                runBlocking { transition(id, TrackStatus.QUEUED) }
+                runBlocking {
+                    val track = dao.getTrack(id)
+                    if (track != null) {
+                        track.status = TrackStatus.QUEUED
+                        track.updatedAt = now
+                        dao.updateTrack(track)
+                    }
+                }
+                trackWatchdogs.remove(id)
             }
         }
         
         if (activeWorkerCount.get() > 0 && trackWatchdogs.isEmpty()) {
             Log.e(TAG, "CRITICAL: activeWorkerCount > 0 but no active watchdogs. Resetting.")
             activeWorkerCount.set(0)
-        }
-    }
-
-    suspend fun transition(trackId: String, nextStatus: TrackStatus) {
-        mutex.withLock {
-            val track = dao.getTrack(trackId) ?: return
-            if (isValidTransition(track.status, nextStatus)) {
-                transitionInternal(track, nextStatus)
-                dao.updateTrack(track)
-                updateBatchState(track.batchId)
-            }
-        }
-    }
-
-    private fun transitionInternal(track: Track, nextStatus: TrackStatus) {
-        track.status = nextStatus
-        track.updatedAt = System.currentTimeMillis()
-    }
-
-    private fun isValidTransition(from: TrackStatus, to: TrackStatus): Boolean {
-        return when (from) {
-            TrackStatus.EXTRACTED -> to in listOf(TrackStatus.MATCHING, TrackStatus.MATCHED, TrackStatus.QUEUED)
-            TrackStatus.MATCHING -> to in listOf(TrackStatus.MATCHED, TrackStatus.MATCHED_LOW_CONFIDENCE, TrackStatus.FAILED)
-            TrackStatus.MATCHED -> to == TrackStatus.QUEUED
-            TrackStatus.MATCHED_LOW_CONFIDENCE -> to in listOf(TrackStatus.MATCHED, TrackStatus.MATCHING, TrackStatus.MATCHING_MANUAL)
-            TrackStatus.MATCHING_MANUAL -> to in listOf(TrackStatus.MATCHED, TrackStatus.MATCHED_LOW_CONFIDENCE, TrackStatus.FAILED)
-            TrackStatus.QUEUED -> to == TrackStatus.DISPATCHING
-            TrackStatus.DISPATCHING -> to in listOf(TrackStatus.DOWNLOADING, TrackStatus.QUEUED)
-            TrackStatus.DOWNLOADING -> to in listOf(TrackStatus.COMPLETED, TrackStatus.FAILED, TrackStatus.QUEUED)
-            TrackStatus.FAILED -> to == TrackStatus.QUEUED
-            TrackStatus.COMPLETED -> false
         }
     }
 
@@ -321,6 +308,19 @@ object BatchManager {
         dao.updateBatch(batch)
     }
 
+    /**
+     * Public transition function for use by BeatItServer (accept/rematch/manual actions).
+     */
+    suspend fun transition(trackId: String, nextStatus: TrackStatus) {
+        mutex.withLock {
+            val track = dao.getTrack(trackId) ?: return
+            track.status = nextStatus
+            track.updatedAt = System.currentTimeMillis()
+            dao.updateTrack(track)
+            updateBatchState(track.batchId)
+        }
+    }
+
     private fun sanitize(name: String): String =
         name.replace(Regex("[^a-zA-Z0-9 _-]"), "").trim().take(80)
 
@@ -339,7 +339,7 @@ object BatchManager {
             
             if (candidates.isEmpty()) {
                 batch.state = BatchState.FAILED
-                batch.errorCode = "Could not extract tracks from this URL. The playlist may be private or the service is unavailable."
+                batch.errorCode = "Could not extract tracks from this URL."
                 dao.updateBatch(batch)
                 return ImportResult(false, error = batch.errorCode)
             }
@@ -360,7 +360,6 @@ object BatchManager {
                     durationSeconds = c.durationSeconds,
                     thumbnailUrl = c.thumbnailUrl,
                     sourcePlatform = c.sourcePlatform,
-                    // If we already have the YouTube URL from extraction, set it directly
                     youtubeVideoId = c.sourceUrl
                 )
             }
@@ -371,7 +370,6 @@ object BatchManager {
             
             Log.d(TAG, "Batch created with ${tracks.size} tracks, starting matching...")
             
-            // Start matching and downloading in background
             CoroutineScope(Dispatchers.IO).launch {
                 processMatching(batch.id)
             }
@@ -388,12 +386,13 @@ object BatchManager {
 
     /**
      * Process matching for tracks in a batch.
-     * For YouTube tracks that already have video URLs, skip matching entirely.
-     * For other tracks, search YouTube in parallel (up to 3 concurrent searches).
+     * YouTube tracks skip matching (already have video URL).
+     * Spotify/Apple tracks matched in parallel (3 concurrent searches).
+     * Pre-fetches stream URLs for matched tracks immediately.
      */
     private suspend fun processMatching(batchId: String) {
         val tracks = dao.getTracksForBatch(batchId)
-        val searchSemaphore = Semaphore(3) // Limit concurrent YouTube searches
+        val searchSemaphore = Semaphore(3)
         
         coroutineScope {
             tracks.map { track ->
@@ -402,19 +401,21 @@ object BatchManager {
                     
                     // Fast path: YouTube tracks already have the video URL
                     if (track.youtubeVideoId != null) {
-                        Log.d(TAG, "⚡ Fast-match (already have URL): ${track.title}")
+                        Log.d(TAG, "⚡ Fast-match: ${track.title}")
                         track.matchConfidence = 1.0
                         track.status = TrackStatus.QUEUED
                         track.updatedAt = System.currentTimeMillis()
                         dao.updateTrack(track)
-                        Log.d(TAG, "✓ Queued: ${track.title} -> ${track.status}")
+                        
+                        // Pre-fetch the stream URL immediately
+                        youtubeHelper.prefetchStreamInfo(track.youtubeVideoId!!)
                         return@async
                     }
                     
-                    // Slow path: Need to search YouTube (for Spotify/Apple Music tracks)
+                    // Slow path: search YouTube
                     searchSemaphore.acquire()
                     try {
-                        Log.d(TAG, "🔍 Searching YouTube for: ${track.title} ${track.artist}")
+                        Log.d(TAG, "🔍 Searching: ${track.title} ${track.artist}")
                         track.status = TrackStatus.MATCHING
                         track.updatedAt = System.currentTimeMillis()
                         dao.updateTrack(track)
@@ -430,10 +431,11 @@ object BatchManager {
                             track.status = TrackStatus.MATCHED_LOW_CONFIDENCE
                         } else {
                             track.status = TrackStatus.QUEUED
+                            // Pre-fetch stream URL
+                            youtubeHelper.prefetchStreamInfo(videoId)
                         }
                         track.updatedAt = System.currentTimeMillis()
                         dao.updateTrack(track)
-                        Log.d(TAG, "✓ Matched: ${track.title} -> ${track.status}")
                     } finally {
                         searchSemaphore.release()
                     }

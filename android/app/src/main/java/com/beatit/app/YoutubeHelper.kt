@@ -50,11 +50,8 @@ class YoutubeHelper {
      * can await it instead of starting a duplicate extraction.
      */
     fun prefetchStreamInfo(videoUrl: String) {
-        // Already cached and valid
         val cached = streamCache[videoUrl]
         if (cached != null && !cached.isExpired()) return
-
-        // Already fetching — don't duplicate
         if (pendingFetches.containsKey(videoUrl)) return
 
         val future = prefetchExecutor.submit<String?> {
@@ -74,51 +71,125 @@ class YoutubeHelper {
         pendingFetches[videoUrl] = future
     }
 
-    /**
-     * Check if a stream URL is already cached and ready.
-     */
     fun isPrefetched(videoUrl: String): Boolean {
         val cached = streamCache[videoUrl] ?: return false
         return !cached.isExpired()
     }
 
     /**
-     * Get the best audio stream URL. Three-tier approach:
+     * Get the best audio stream URL with full fallback chain:
      * 1. Cache hit → instant
-     * 2. Pending prefetch → await (no duplicate work)
-     * 3. Fresh extraction (last resort)
+     * 2. Pending prefetch → await
+     * 3. Fresh YouTube extraction
+     * 4. Piped instance fallback (if YouTube fails)
      */
     fun getAudioStreamUrl(videoUrl: String): Pair<String?, String?> {
-        // 1. Cache hit — instant return
+        // 1. Cache hit
         val cached = streamCache[videoUrl]
         if (cached != null && !cached.isExpired()) {
             return Pair(cached.streamUrl, null)
         }
 
-        // 2. Await pending prefetch — avoid duplicate StreamInfo.getInfo()
+        // 2. Await pending prefetch
         val pending = pendingFetches[videoUrl]
         if (pending != null) {
             try {
                 val url = pending.get(30, TimeUnit.SECONDS)
                 if (url != null) return Pair(url, null)
-            } catch (_: Exception) {
-                // Prefetch failed — fall through to fresh extraction
-            }
+            } catch (_: Exception) { }
         }
 
-        // 3. Fresh extraction
-        return try {
+        // 3. Fresh YouTube extraction
+        try {
             val info = StreamInfo.getInfo(ServiceList.YouTube, videoUrl)
             val url = extractBestUrl(info)
             if (url != null) {
                 streamCache[videoUrl] = CachedStream(url)
-                Pair(url, null)
-            } else {
-                Pair(null, "No audio or video streams found for this video")
+                return Pair(url, null)
             }
         } catch (e: Exception) {
-            Pair(null, e.message ?: "Unknown error extracting stream")
+            android.util.Log.w("YoutubeHelper", "YouTube extraction failed: ${e.message}, trying Piped fallback...")
         }
+
+        // 4. Piped fallback — try multiple instances
+        val videoId = extractVideoId(videoUrl)
+        if (videoId != null) {
+            val pipedResult = getStreamFromPiped(videoId)
+            if (pipedResult != null) {
+                streamCache[videoUrl] = CachedStream(pipedResult)
+                return Pair(pipedResult, null)
+            }
+        }
+
+        return Pair(null, "All extraction methods failed for this video")
+    }
+
+    /**
+     * Extract video ID from various YouTube URL formats.
+     */
+    private fun extractVideoId(url: String): String? {
+        val patterns = listOf(
+            Regex("""(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})"""),
+            Regex("""^([a-zA-Z0-9_-]{11})$""")
+        )
+        for (pattern in patterns) {
+            val match = pattern.find(url)
+            if (match != null) return match.groupValues[1]
+        }
+        return null
+    }
+
+    /**
+     * Try to get audio stream URL from Piped instances.
+     * Piped is an open-source YouTube frontend with public API instances.
+     */
+    private fun getStreamFromPiped(videoId: String): String? {
+        for (instance in PIPED_INSTANCES) {
+            try {
+                android.util.Log.d("YoutubeHelper", "Trying Piped instance: $instance")
+                val client = SegmentedDownloader.httpClient
+                val request = okhttp3.Request.Builder()
+                    .url("$instance/streams/$videoId")
+                    .header("User-Agent", "Mozilla/5.0")
+                    .build()
+                
+                val response = client.newCall(request).execute()
+                if (!response.isSuccessful) {
+                    response.close()
+                    continue
+                }
+                
+                val body = response.body?.string() ?: continue
+                val json = com.google.gson.JsonParser.parseString(body).asJsonObject
+                
+                val audioStreams = json.getAsJsonArray("audioStreams") ?: continue
+                
+                // Find the best audio stream by bitrate
+                var bestUrl: String? = null
+                var bestBitrate = 0
+                
+                for (stream in audioStreams) {
+                    val streamObj = stream.asJsonObject
+                    val streamUrl = streamObj.get("url")?.asString ?: continue
+                    val bitrate = streamObj.get("bitrate")?.asInt ?: 0
+                    val mimeType = streamObj.get("mimeType")?.asString ?: ""
+                    
+                    // Prefer audio-only streams (opus/webm or m4a)
+                    if (mimeType.startsWith("audio/") && bitrate > bestBitrate) {
+                        bestBitrate = bitrate
+                        bestUrl = streamUrl
+                    }
+                }
+
+                if (bestUrl != null) {
+                    android.util.Log.d("YoutubeHelper", "✓ Piped stream found: ${bestBitrate}bps from $instance")
+                    return bestUrl
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("YoutubeHelper", "Piped instance $instance failed: ${e.message}")
+            }
+        }
+        return null
     }
 
     // ── Reject pattern for non-music content ─────────────────────
@@ -173,7 +244,14 @@ class YoutubeHelper {
         private const val CACHE_TTL_MS = 3600_000L // 1 hour
         private val streamCache = ConcurrentHashMap<String, CachedStream>()
         private val pendingFetches = ConcurrentHashMap<String, Future<String?>>()
-        private val prefetchExecutor = Executors.newFixedThreadPool(3)
+        private val prefetchExecutor = Executors.newFixedThreadPool(5)
+        
+        // Piped instances for fallback when YouTube rate-limits
+        private val PIPED_INSTANCES = listOf(
+            "https://pipedapi.kavin.rocks",
+            "https://pipedapi.adminforge.de",
+            "https://api.piped.projectsegfau.lt"
+        )
     }
 }
 
