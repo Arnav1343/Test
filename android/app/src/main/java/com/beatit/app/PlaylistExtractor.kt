@@ -61,9 +61,18 @@ object PlaylistExtractor {
     )
 
     private fun extractSpotify(url: String): List<TrackCandidate> {
-        // Since we don't have a full Spotify API key/extractor here,
-        // we use Jsoup to extract metadata from the public preview page.
-        // This is a fallback for single tracks or simple previews.
+        // Try the official Spotify Web API first
+        try {
+            val playlistId = SpotifyClient.extractPlaylistId(url)
+            if (playlistId != null) {
+                val tracks = SpotifyClient.getPlaylistTracks(playlistId)
+                if (tracks.isNotEmpty()) return tracks
+            }
+        } catch (e: Exception) {
+            // API failed, fall through to scraper fallback
+        }
+
+        // Fallback: scrape the public page for basic metadata
         return try {
             val doc = Jsoup.connect(url).get()
             val title = doc.select("meta[property=og:title]").attr("content")
@@ -78,6 +87,7 @@ object PlaylistExtractor {
             emptyList()
         }
     }
+
 
     private fun extractAppleMusic(url: String): List<TrackCandidate> {
         return try {
