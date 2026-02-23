@@ -5,6 +5,8 @@ import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.playlist.PlaylistInfo
 import org.schabi.newpipe.extractor.stream.StreamInfoItem
 import org.jsoup.Jsoup
+import com.google.gson.Gson
+import com.google.gson.JsonParser
 import java.security.MessageDigest
 import java.util.*
 import kotlin.math.roundToInt
@@ -18,6 +20,7 @@ data class TrackCandidate(
 )
 
 object PlaylistExtractor {
+    private const val TAG = "PlaylistExtractor"
 
     suspend fun extract(url: String, platform: SourcePlatform): List<TrackCandidate> {
         return when (platform) {
@@ -32,11 +35,9 @@ object PlaylistExtractor {
             val info = PlaylistInfo.getInfo(ServiceList.YouTube, url)
             val tracks = mutableListOf<TrackCandidate>()
             
-            // Handle pagination (initial page)
             var currentItems = info.relatedItems.filterIsInstance<StreamInfoItem>()
             tracks.addAll(currentItems.map { it.toCandidate() })
 
-            // Basic pagination loop (simplified for now, NewPipe supports more)
             var nextPage = info.nextPage
             var count = tracks.size
             while (nextPage != null && count < 500) {
@@ -49,6 +50,7 @@ object PlaylistExtractor {
 
             tracks.take(500)
         } catch (e: Exception) {
+            Log.e(TAG, "YouTube extraction failed: ${e.message}", e)
             emptyList()
         }
     }
@@ -62,45 +64,159 @@ object PlaylistExtractor {
     )
 
     private fun extractSpotify(url: String): List<TrackCandidate> {
-        // Try the official Spotify Web API first (handles playlists AND albums)
+        // Strategy 1: Try the official Spotify Web API (works for public playlists/albums)
         try {
-            Log.d("PlaylistExtractor", "Attempting Spotify API extraction for: $url")
+            Log.d(TAG, "Attempting Spotify API extraction for: $url")
             val tracks = SpotifyClient.getTracks(url)
             if (tracks.isNotEmpty()) {
-                Log.d("PlaylistExtractor", "Spotify API returned ${tracks.size} tracks")
+                Log.d(TAG, "Spotify API returned ${tracks.size} tracks")
                 return tracks
             }
-            Log.w("PlaylistExtractor", "Spotify API returned 0 tracks for URL: $url")
+            Log.w(TAG, "Spotify API returned 0 tracks")
         } catch (e: Exception) {
-            Log.e("PlaylistExtractor", "Spotify API failed: ${e.message}", e)
+            Log.w(TAG, "Spotify API failed (${e.message}), trying web scraping...")
         }
 
-        // Fallback: scrape the public page for basic metadata
-        Log.d("PlaylistExtractor", "Falling back to Jsoup scraper for: $url")
-        return try {
-            val doc = Jsoup.connect(url).get()
-            val title = doc.select("meta[property=og:title]").attr("content")
-            val artist = doc.select("meta[property=og:description]").attr("content")
-                ?.split("·")?.getOrNull(0)?.trim() ?: ""
-            val thumb = doc.select("meta[property=og:image]").attr("content")
-            
-            if (title.isNotEmpty()) {
-                Log.d("PlaylistExtractor", "Jsoup fallback got title: $title")
-                listOf(TrackCandidate(title, artist, null, thumb, SourcePlatform.SPOTIFY))
-            } else {
-                Log.w("PlaylistExtractor", "Jsoup fallback: no title found")
-                emptyList()
+        // Strategy 2: Scrape the Spotify web page for track data
+        // Spotify embeds track info in the HTML for SEO purposes
+        try {
+            Log.d(TAG, "Trying Spotify web scraping for: $url")
+            val tracks = scrapeSpotifyPage(url)
+            if (tracks.isNotEmpty()) {
+                Log.d(TAG, "Web scraping found ${tracks.size} tracks")
+                return tracks
             }
         } catch (e: Exception) {
-            Log.e("PlaylistExtractor", "Jsoup fallback also failed: ${e.message}", e)
-            emptyList()
+            Log.e(TAG, "Web scraping failed: ${e.message}", e)
+        }
+
+        Log.e(TAG, "All Spotify extraction methods failed for: $url")
+        return emptyList()
+    }
+
+    /**
+     * Scrapes the Spotify web page to extract track information.
+     * Spotify includes track metadata in the page HTML for SEO:
+     * - <meta> tags with track listing info
+     * - Track names appear in the page's text content
+     * - The page description often lists track names
+     */
+    private fun scrapeSpotifyPage(url: String): List<TrackCandidate> {
+        val tracks = mutableListOf<TrackCandidate>()
+
+        val doc = Jsoup.connect(url)
+            .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .timeout(15000)
+            .get()
+
+        val thumb = doc.select("meta[property=og:image]").attr("content")
+        
+        // Method A: Parse ld+json structured data (MusicPlaylist/MusicAlbum schema)
+        val ldJsonScripts = doc.select("script[type=application/ld+json]")
+        for (script in ldJsonScripts) {
+            try {
+                val json = JsonParser.parseString(script.data())
+                if (json.isJsonObject) {
+                    val obj = json.asJsonObject
+                    val type = obj.get("@type")?.asString ?: ""
+                    
+                    if (type == "MusicPlaylist" || type == "MusicAlbum") {
+                        val trackList = obj.getAsJsonArray("track") ?: continue
+                        for (trackEl in trackList) {
+                            val trackObj = trackEl.asJsonObject
+                            val name = trackObj.get("name")?.asString ?: continue
+                            val artistObj = trackObj.getAsJsonObject("byArtist")
+                            val artist = artistObj?.get("name")?.asString ?: ""
+                            val durationStr = trackObj.get("duration")?.asString
+                            val durationSec = parseDuration(durationStr)
+                            
+                            tracks.add(TrackCandidate(
+                                title = name,
+                                artist = artist,
+                                durationSeconds = durationSec,
+                                thumbnailUrl = thumb,
+                                sourcePlatform = SourcePlatform.SPOTIFY
+                            ))
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "ld+json parse attempt failed: ${e.message}")
+            }
+        }
+
+        if (tracks.isNotEmpty()) {
+            Log.d(TAG, "ld+json extracted ${tracks.size} tracks")
+            return tracks
+        }
+
+        // Method B: Parse description meta tag 
+        // Spotify often puts track listing in the description like:
+        // "Playlist · User · 50 songs" or lists track names
+        val description = doc.select("meta[property=og:description]").attr("content")
+        val title = doc.select("meta[property=og:title]").attr("content")
+        Log.d(TAG, "Page title='$title', description='${description.take(200)}'")
+
+        // Method C: Look for track rows in the HTML 
+        // Spotify renders track list items with specific data attributes
+        val trackElements = doc.select("[data-testid=tracklist-row], .tracklist-row, [data-encore-id=listRowContent]")
+        Log.d(TAG, "Found ${trackElements.size} track DOM elements")
+        
+        for (el in trackElements) {
+            val trackName = el.select("a[data-testid=internal-track-link], .tracklist-name, [data-encore-id=text]").firstOrNull()?.text()
+            val artistName = el.select(".tracklist-row__artist-name-link, span[data-encore-id=text]").getOrNull(1)?.text()
+            
+            if (!trackName.isNullOrBlank()) {
+                tracks.add(TrackCandidate(
+                    title = trackName,
+                    artist = artistName ?: "",
+                    durationSeconds = null,
+                    thumbnailUrl = thumb,
+                    sourcePlatform = SourcePlatform.SPOTIFY
+                ))
+            }
+        }
+
+        if (tracks.isNotEmpty()) {
+            Log.d(TAG, "DOM scraping extracted ${tracks.size} tracks")
+            return tracks
+        }
+
+        // Method D: If we at least got the title, return it as a single searchable item
+        if (title.isNotEmpty()) {
+            val artist = description.split("·").getOrNull(0)?.trim() ?: ""
+            Log.d(TAG, "Fallback: returning playlist title as single item: $title")
+            return listOf(TrackCandidate(title, artist, null, thumb, SourcePlatform.SPOTIFY))
+        }
+
+        return emptyList()
+    }
+
+    /**
+     * Parse ISO 8601 duration like "PT3M45S" to seconds
+     */
+    private fun parseDuration(iso: String?): Int? {
+        if (iso == null) return null
+        try {
+            var total = 0
+            val matcher = Regex("""PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?""").matchEntire(iso) ?: return null
+            val (h, m, s) = matcher.destructured
+            if (h.isNotEmpty()) total += h.toInt() * 3600
+            if (m.isNotEmpty()) total += m.toInt() * 60
+            if (s.isNotEmpty()) total += s.toInt()
+            return if (total > 0) total else null
+        } catch (e: Exception) {
+            return null
         }
     }
 
 
     private fun extractAppleMusic(url: String): List<TrackCandidate> {
         return try {
-            val doc = Jsoup.connect(url).get()
+            val doc = Jsoup.connect(url)
+                .userAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .timeout(15000)
+                .get()
             val title = doc.select("meta[property=og:title]").attr("content")
             val artist = doc.select("meta[property=og:description]").attr("content")
                 ?.split("·")?.getOrNull(0)?.trim() ?: ""
@@ -110,6 +226,7 @@ object PlaylistExtractor {
                 listOf(TrackCandidate(title, artist, null, thumb, SourcePlatform.APPLE_MUSIC))
             } else emptyList()
         } catch (e: Exception) {
+            Log.e(TAG, "Apple Music extraction failed: ${e.message}", e)
             emptyList()
         }
     }
@@ -132,10 +249,10 @@ object PlaylistExtractor {
 
     fun sanitize(text: String): String {
         return text.lowercase()
-            .replace(Regex("""\(.*?\)|\[.*?\]"""), "") // Remove bracketed text
+            .replace(Regex("""\(.*?\)|\[.*?\]"""), "")
             .replace(Regex("""(?i)\b(feat|ft|official|video|audio|remastered|lyrics|hq|hd|high quality)\b"""), "")
-            .replace(Regex("""[^\w\s]"""), "") // Remove non-alphanumeric except space
-            .replace(Regex("""\s+"""), " ") // Double spaces
+            .replace(Regex("""[^\w\s]"""), "")
+            .replace(Regex("""\s+"""), " ")
             .trim()
     }
 
