@@ -530,7 +530,8 @@
             const r = await fetch('/api/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
             const d = await r.json();
             if (d.error) { $('#importStatus').textContent = d.error; showToast(d.error, 'error'); return; }
-            showToast('Batch submitted!', 'success');
+            const count = d.trackCount || '?';
+            showToast(`Found ${count} tracks! Importing...`, 'success');
             $('#importInput').value = '';
             showView('batches');
         } catch { $('#importStatus').textContent = 'Submission failed'; showToast('Failed', 'error'); }

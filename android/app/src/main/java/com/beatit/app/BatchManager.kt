@@ -306,35 +306,63 @@ object BatchManager {
     private fun sanitize(name: String): String =
         name.replace(Regex("[^a-zA-Z0-9 _-]"), "").trim().take(80)
 
-    fun submitBatch(url: String, platform: SourcePlatform) {
-        if (isRecovering) return
-        CoroutineScope(Dispatchers.IO).launch {
-            val batch = BatchTask(state = BatchState.EXTRACTING)
-            dao.insertBatch(batch)
-            try {
-                val candidates = PlaylistExtractor.extract(url, platform)
-                if (candidates.size > 500) throw IOException("Batch exceeds 500 tracks")
-                val tracks = candidates.map { c ->
-                    Track(
-                        batchId = batch.id,
-                        fingerprint = PlaylistExtractor.computeFingerprint(c.title, c.artist, c.durationSeconds),
-                        title = c.title,
-                        artist = c.artist,
-                        durationSeconds = c.durationSeconds,
-                        thumbnailUrl = c.thumbnailUrl,
-                        sourcePlatform = c.sourcePlatform
-                    )
-                }
-                dao.insertTracks(tracks)
-                batch.totalTracks = tracks.size
-                batch.state = BatchState.MATCHING
-                dao.updateBatch(batch)
-                processMatching(batch.id)
-            } catch (e: Exception) {
+    data class ImportResult(val success: Boolean, val trackCount: Int = 0, val error: String? = null)
+
+    suspend fun submitBatch(url: String, platform: SourcePlatform): ImportResult {
+        if (isRecovering) return ImportResult(false, error = "System is recovering, please try again in a moment")
+
+        val batch = BatchTask(state = BatchState.EXTRACTING)
+        dao.insertBatch(batch)
+        
+        return try {
+            Log.d(TAG, "Starting extraction for URL: $url, platform: $platform")
+            val candidates = PlaylistExtractor.extract(url, platform)
+            Log.d(TAG, "Extraction returned ${candidates.size} candidates")
+            
+            if (candidates.isEmpty()) {
                 batch.state = BatchState.FAILED
-                batch.errorCode = e.message
+                batch.errorCode = "Could not extract tracks from this URL. The playlist may be private or the service is unavailable."
                 dao.updateBatch(batch)
+                return ImportResult(false, error = batch.errorCode)
             }
+            
+            if (candidates.size > 500) {
+                batch.state = BatchState.FAILED
+                batch.errorCode = "Playlist too large (${candidates.size} tracks, max 500)"
+                dao.updateBatch(batch)
+                return ImportResult(false, error = batch.errorCode)
+            }
+            
+            val tracks = candidates.map { c ->
+                Track(
+                    batchId = batch.id,
+                    fingerprint = PlaylistExtractor.computeFingerprint(c.title, c.artist, c.durationSeconds),
+                    title = c.title,
+                    artist = c.artist,
+                    durationSeconds = c.durationSeconds,
+                    thumbnailUrl = c.thumbnailUrl,
+                    sourcePlatform = c.sourcePlatform
+                )
+            }
+            dao.insertTracks(tracks)
+            batch.totalTracks = tracks.size
+            batch.state = BatchState.MATCHING
+            dao.updateBatch(batch)
+            
+            Log.d(TAG, "Batch created with ${tracks.size} tracks, starting matching...")
+            
+            // Start matching and downloading in background
+            CoroutineScope(Dispatchers.IO).launch {
+                processMatching(batch.id)
+            }
+            
+            ImportResult(true, trackCount = tracks.size)
+        } catch (e: Exception) {
+            Log.e(TAG, "submitBatch failed: ${e.message}", e)
+            batch.state = BatchState.FAILED
+            batch.errorCode = e.message
+            dao.updateBatch(batch)
+            ImportResult(false, error = "Import failed: ${e.message}")
         }
     }
 

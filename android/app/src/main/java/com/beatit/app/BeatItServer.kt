@@ -173,8 +173,16 @@ class BeatItServer(private val context: Context, port: Int) : NanoHTTPD(port) {
         val url = gson.fromJson(body, Map::class.java)["url"] as? String ?: return jsonError("No URL")
         val platform = PlatformDetector.detectPlatform(url) ?: return jsonError("Unsupported platform or invalid URL")
         
-        BatchManager.submitBatch(url, platform)
-        return jsonOk(mapOf("success" to true))
+        // Run extraction synchronously so we can return errors to the UI
+        val result = kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+            BatchManager.submitBatch(url, platform)
+        }
+        
+        return if (result.success) {
+            jsonOk(mapOf("success" to true, "trackCount" to result.trackCount))
+        } else {
+            jsonError(result.error ?: "Unknown import error")
+        }
     }
 
     private fun handleImportList(): Response {
