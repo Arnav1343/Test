@@ -585,6 +585,9 @@
         }
 
         $('#batchList').innerHTML = html;
+        // Scroll selected batch into view
+        const selBatch = $('#batchList .batch-item.selected');
+        if (selBatch) selBatch.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
 
 
@@ -608,6 +611,9 @@
                 <div class="track-info"><div class="track-title">${escH(t.title)}</div><div class="track-status-pill ${sc}">${t.status}</div></div>
             </div>`;
         }).join('');
+        // Scroll selected track into view
+        const selTrack = $('#batchTrackList .track-item.selected');
+        if (selTrack) selTrack.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
 
     function batchesUp() { batchesIndex = Math.max(0, batchesIndex - 1); renderBatches(); }
@@ -727,7 +733,7 @@
             case 'ArrowDown': e.preventDefault(); handleScroll(1); break;
             case 'ArrowLeft': e.preventDefault(); prevTrack(); break;
             case 'ArrowRight': e.preventDefault(); nextTrack(); break;
-            case 'Enter': e.preventDefault(); if (currentView === 'menu') menuSelect(); else if (currentView === 'library') libSelect(); break;
+            case 'Enter': e.preventDefault(); if (currentView === 'menu') menuSelect(); else if (currentView === 'library') libSelect(); else if (currentView === 'batches') batchesSelect(); else if (currentView === 'batchDetail') tracksSelect(); break;
             case 'Escape': case 'Backspace': if (document.activeElement !== searchInput) { e.preventDefault(); goBack(); } break;
             case ' ': if (document.activeElement !== searchInput) { e.preventDefault(); togglePlay(); } break;
             case 'Delete': if (currentView === 'library' && library[libraryIndex]) { e.preventDefault(); deleteSong(library[libraryIndex].filename); } break;
