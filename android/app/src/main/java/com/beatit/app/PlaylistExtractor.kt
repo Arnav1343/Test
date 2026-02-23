@@ -16,7 +16,8 @@ data class TrackCandidate(
     val artist: String,
     val durationSeconds: Int?,
     val thumbnailUrl: String?,
-    val sourcePlatform: SourcePlatform
+    val sourcePlatform: SourcePlatform,
+    val sourceUrl: String? = null  // YouTube video URL when extracted from YT playlists
 )
 
 object PlaylistExtractor {
@@ -60,7 +61,8 @@ object PlaylistExtractor {
         artist = uploaderName ?: "Unknown",
         durationSeconds = duration.toInt().takeIf { it > 0 },
         thumbnailUrl = thumbnails.firstOrNull()?.url,
-        sourcePlatform = SourcePlatform.YOUTUBE
+        sourcePlatform = SourcePlatform.YOUTUBE,
+        sourceUrl = url  // Carry the YouTube video URL so we can skip matching
     )
 
     private fun extractSpotify(url: String): List<TrackCandidate> {
