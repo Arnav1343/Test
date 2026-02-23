@@ -1768,3 +1768,26 @@ body {
   border-bottom: 1px solid var(--divider);
   margin-bottom: 4px;
 }
+
+/* ─── Download Paused State ──────────────────────────────────── */
+.download-progress-fill.paused {
+  animation: pausePulse 1.5s ease-in-out infinite;
+  background: #f59e0b !important;
+}
+
+@keyframes pausePulse {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.download-status.warning {
+  color: #f59e0b;
+  font-size: 11px;
+}

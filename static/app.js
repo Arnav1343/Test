@@ -425,15 +425,18 @@
                 const r = await fetch('/api/progress/' + id); const d = await r.json();
                 const onSearch = currentView === 'search';
                 if (d.status === 'downloading') {
-                    if (onSearch) { downloadProgressWrap.classList.remove('hidden'); downloadProgressFill.style.width = d.percent + '%'; downloadProgressText.textContent = d.percent + '%'; downloadStatus.textContent = 'Downloading...'; }
+                    if (onSearch) { downloadProgressWrap.classList.remove('hidden'); downloadProgressFill.style.width = d.percent + '%'; downloadProgressText.textContent = d.percent + '%'; downloadStatus.textContent = 'Downloading...'; downloadStatus.className = 'download-status'; downloadProgressFill.classList.remove('paused'); }
+                }
+                else if (d.status === 'paused') {
+                    if (onSearch) { downloadProgressWrap.classList.remove('hidden'); downloadProgressFill.style.width = d.percent + '%'; downloadProgressText.textContent = d.percent + '%'; downloadStatus.textContent = d.error || 'Paused — waiting for network...'; downloadStatus.className = 'download-status warning'; downloadProgressFill.classList.add('paused'); }
                 }
                 else if (d.status === 'converting') {
-                    if (onSearch) { downloadProgressFill.style.width = '100%'; downloadProgressText.textContent = '100%'; downloadStatus.textContent = 'Converting...'; }
+                    if (onSearch) { downloadProgressFill.style.width = '100%'; downloadProgressText.textContent = '100%'; downloadStatus.textContent = 'Converting...'; downloadProgressFill.classList.remove('paused'); }
                 }
                 else if (d.status === 'done' && d.result) {
                     clearInterval(progressPollInterval); progressPollInterval = null;
                     activeDownloadTaskId = null;
-                    if (onSearch) { downloadProgressFill.style.width = '100%'; downloadProgressText.textContent = '✓'; downloadStatus.textContent = '✓ Saved (' + d.result.size_human + ')'; downloadStatus.className = 'download-status success'; downloadBtn.disabled = false; }
+                    if (onSearch) { downloadProgressFill.style.width = '100%'; downloadProgressText.textContent = '✓'; downloadStatus.textContent = '✓ Saved (' + d.result.size_human + ')'; downloadStatus.className = 'download-status success'; downloadBtn.disabled = false; downloadProgressFill.classList.remove('paused'); }
                     showToast('Downloaded!', 'success');
                     await refreshLibrary();
                 } else if (d.status === 'error') {
@@ -445,6 +448,7 @@
             } catch { }
         }, 800);
     }
+
 
     downloadBtn.addEventListener('click', doDownload);
     $('#btnShuffle')?.addEventListener('click', () => { isShuffle = !isShuffle; $('#btnShuffle').classList.toggle('active', isShuffle); showToast(isShuffle ? 'Shuffle on' : 'Shuffle off'); });
