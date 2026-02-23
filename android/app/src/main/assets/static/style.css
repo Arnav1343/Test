@@ -6,14 +6,20 @@
 
 /* ─── View System ─────────────────────────────────────────────── */
 .view {
-  display: none;
+  display: none !important;
+  position: absolute;
+  top: 0;
+  left: 0;
   width: 100%;
   height: 100%;
   overflow-y: auto;
+  z-index: 1;
 }
 
 .view.active {
-  display: block;
+  display: block !important;
+  position: relative;
+  z-index: 2;
 }
 
 

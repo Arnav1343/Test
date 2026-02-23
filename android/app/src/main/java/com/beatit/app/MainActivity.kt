@@ -38,7 +38,7 @@ class MainActivity : Activity() {
             allowFileAccess = true
             allowContentAccess = true
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            cacheMode = WebSettings.LOAD_DEFAULT
+            cacheMode = WebSettings.LOAD_NO_CACHE
             mediaPlaybackRequiresUserGesture = false
         }
 
