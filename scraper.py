@@ -186,8 +186,6 @@ class SongScraper:
 
         if self.codec == "opus":
             # ── Opus path: keep native opus stream when available ────
-            # YouTube already encodes in opus/webm; we re-encode to a
-            # standalone .opus container at the target bitrate.
             postprocessors = [
                 {
                     "key": "FFmpegExtractAudio",
@@ -201,7 +199,7 @@ class SongScraper:
                 "extractaudio": ["-b:a", f"{self.quality}k", "-vbr", "on"],
             }
         else:
-            # ── MP3 path (original, max-quality) ────────────────────
+            # ── MP3 path (max-quality, fast) ─────────────────────────
             postprocessors = [
                 {
                     "key": "FFmpegExtractAudio",
@@ -209,7 +207,6 @@ class SongScraper:
                     "preferredquality": str(self.quality),
                 },
                 {"key": "FFmpegMetadata", "add_metadata": True},
-                {"key": "EmbedThumbnail", "already_have_thumbnail": False},
             ]
             # Force CBR + full stereo for MP3
             pp_args = {
@@ -217,20 +214,20 @@ class SongScraper:
             }
 
         ydl_opts = {
-            "format": "bestaudio[asr>=44100]/bestaudio/best",
-            "format_sort": ["abr", "asr"],
+            "format": "bestaudio/best",
             "outtmpl": outtmpl,
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
-            "concurrent_fragment_downloads": 4,
-            "buffersize": 1024 * 64,
-            "writethumbnail": True,
+            "concurrent_fragment_downloads": 8,
+            "buffersize": 1024 * 128,
+            "http_chunk_size": 1024 * 1024 * 10,
             "postprocessors": postprocessors,
             "postprocessor_args": pp_args,
             "restrictfilenames": True,
             "windowsfilenames": True,
         }
+
 
         if progress_hook:
             ydl_opts["progress_hooks"] = [progress_hook]

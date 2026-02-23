@@ -131,11 +131,13 @@ object SpotifyClient {
     fun getPlaylistTracks(playlistId: String): List<TrackCandidate> {
         val tracks = mutableListOf<TrackCandidate>()
 
-        var url: String? = "$API_BASE/playlists/$playlistId/tracks?limit=100&fields=items(track(name,artists(name),duration_ms,album(name,images))),next,total"
+        var url: String? = "$API_BASE/playlists/$playlistId/tracks?limit=100"
 
         while (url != null && tracks.size < 500) {
             val body = apiGet(url)
+            Log.d(TAG, "API response (first 500 chars): ${body.take(500)}")
             val page = gson.fromJson(body, TracksPage::class.java)
+            Log.d(TAG, "Parsed page: ${page.items?.size ?: 0} items, next=${page.next != null}")
 
             page.items?.forEach { item ->
                 val t = item.track ?: return@forEach
@@ -161,4 +163,5 @@ object SpotifyClient {
         Log.d(TAG, "Fetched ${tracks.size} tracks from playlist $playlistId")
         return tracks.take(500)
     }
+
 }
