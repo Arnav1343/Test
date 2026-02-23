@@ -1,5 +1,6 @@
 package com.beatit.app
 
+import android.util.Log
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.playlist.PlaylistInfo
 import org.schabi.newpipe.extractor.stream.StreamInfoItem
@@ -61,18 +62,21 @@ object PlaylistExtractor {
     )
 
     private fun extractSpotify(url: String): List<TrackCandidate> {
-        // Try the official Spotify Web API first
+        // Try the official Spotify Web API first (handles playlists AND albums)
         try {
-            val playlistId = SpotifyClient.extractPlaylistId(url)
-            if (playlistId != null) {
-                val tracks = SpotifyClient.getPlaylistTracks(playlistId)
-                if (tracks.isNotEmpty()) return tracks
+            Log.d("PlaylistExtractor", "Attempting Spotify API extraction for: $url")
+            val tracks = SpotifyClient.getTracks(url)
+            if (tracks.isNotEmpty()) {
+                Log.d("PlaylistExtractor", "Spotify API returned ${tracks.size} tracks")
+                return tracks
             }
+            Log.w("PlaylistExtractor", "Spotify API returned 0 tracks for URL: $url")
         } catch (e: Exception) {
-            // API failed, fall through to scraper fallback
+            Log.e("PlaylistExtractor", "Spotify API failed: ${e.message}", e)
         }
 
         // Fallback: scrape the public page for basic metadata
+        Log.d("PlaylistExtractor", "Falling back to Jsoup scraper for: $url")
         return try {
             val doc = Jsoup.connect(url).get()
             val title = doc.select("meta[property=og:title]").attr("content")
@@ -81,9 +85,14 @@ object PlaylistExtractor {
             val thumb = doc.select("meta[property=og:image]").attr("content")
             
             if (title.isNotEmpty()) {
+                Log.d("PlaylistExtractor", "Jsoup fallback got title: $title")
                 listOf(TrackCandidate(title, artist, null, thumb, SourcePlatform.SPOTIFY))
-            } else emptyList()
+            } else {
+                Log.w("PlaylistExtractor", "Jsoup fallback: no title found")
+                emptyList()
+            }
         } catch (e: Exception) {
+            Log.e("PlaylistExtractor", "Jsoup fallback also failed: ${e.message}", e)
             emptyList()
         }
     }

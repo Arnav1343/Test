@@ -12,7 +12,7 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Spotify Web API client using Client Credentials flow.
- * No user login required — reads public playlist data only.
+ * No user login required — reads public playlist and album data only.
  */
 object SpotifyClient {
     private const val TAG = "SpotifyClient"
@@ -37,11 +37,6 @@ object SpotifyClient {
         @SerializedName("expires_in") val expiresIn: Int
     )
 
-    data class PlaylistResponse(
-        val name: String?,
-        val tracks: TracksPage
-    )
-
     data class TracksPage(
         val items: List<PlaylistItem>?,
         val next: String?,
@@ -50,6 +45,20 @@ object SpotifyClient {
 
     data class PlaylistItem(
         val track: SpotifyTrack?
+    )
+
+    // Album tracks endpoint returns items directly as SimpleTrack (no wrapper)
+    data class AlbumTracksPage(
+        val items: List<SpotifySimpleTrack>?,
+        val next: String?,
+        val total: Int?
+    )
+
+    data class SpotifySimpleTrack(
+        val name: String?,
+        val artists: List<SpotifyArtist>?,
+        @SerializedName("duration_ms") val durationMs: Int?,
+        @SerializedName("track_number") val trackNumber: Int?
     )
 
     data class SpotifyTrack(
@@ -66,12 +75,20 @@ object SpotifyClient {
     )
     data class SpotifyImage(val url: String?, val height: Int?)
 
+    // Album metadata (for getting album art)
+    data class AlbumMetadata(
+        val name: String?,
+        val images: List<SpotifyImage>?,
+        val artists: List<SpotifyArtist>?
+    )
+
     // ── Auth ────────────────────────────────────────────────────────
 
     @Synchronized
     private fun ensureToken() {
         if (accessToken != null && System.currentTimeMillis() < tokenExpiresAt) return
 
+        Log.d(TAG, "Requesting new Spotify access token...")
         val credentials = Base64.encodeToString(
             "$CLIENT_ID:$CLIENT_SECRET".toByteArray(),
             Base64.NO_WRAP
@@ -84,13 +101,16 @@ object SpotifyClient {
             .build()
 
         val response = http.newCall(request).execute()
-        if (!response.isSuccessful) throw IOException("Token request failed: ${response.code}")
+        if (!response.isSuccessful) {
+            val errorBody = response.body?.string() ?: ""
+            Log.e(TAG, "Token request failed: HTTP ${response.code}, body: $errorBody")
+            throw IOException("Token request failed: ${response.code}")
+        }
 
         val body = response.body?.string() ?: throw IOException("Empty token response")
         val token = gson.fromJson(body, TokenResponse::class.java)
 
         accessToken = token.accessToken
-        // Refresh 60 seconds early to avoid edge cases
         tokenExpiresAt = System.currentTimeMillis() + (token.expiresIn - 60) * 1000L
         Log.d(TAG, "Spotify token refreshed, expires in ${token.expiresIn}s")
     }
@@ -102,26 +122,69 @@ object SpotifyClient {
             .header("Authorization", "Bearer $accessToken")
             .build()
         val response = http.newCall(request).execute()
-        if (!response.isSuccessful) throw IOException("Spotify API error: ${response.code}")
+        if (!response.isSuccessful) {
+            val errorBody = response.body?.string() ?: ""
+            Log.e(TAG, "Spotify API error: HTTP ${response.code} for $url, body: ${errorBody.take(300)}")
+            throw IOException("Spotify API error: ${response.code}")
+        }
         return response.body?.string() ?: throw IOException("Empty API response")
+    }
+
+    // ── URL Parsing ────────────────────────────────────────────────
+
+    enum class SpotifyType { PLAYLIST, ALBUM }
+    data class SpotifyId(val type: SpotifyType, val id: String)
+
+    /**
+     * Extract playlist or album ID from a Spotify URL.
+     * Handles:
+     *   - https://open.spotify.com/playlist/ID
+     *   - https://open.spotify.com/album/ID
+     *   - spotify:playlist:ID
+     *   - spotify:album:ID
+     */
+    fun extractSpotifyId(url: String): SpotifyId? {
+        // Web URLs: open.spotify.com/playlist/ID or open.spotify.com/album/ID
+        val webPlaylist = Regex("""playlist/([a-zA-Z0-9]+)""").find(url)
+        if (webPlaylist != null) return SpotifyId(SpotifyType.PLAYLIST, webPlaylist.groupValues[1])
+
+        val webAlbum = Regex("""album/([a-zA-Z0-9]+)""").find(url)
+        if (webAlbum != null) return SpotifyId(SpotifyType.ALBUM, webAlbum.groupValues[1])
+
+        // URI format: spotify:playlist:ID or spotify:album:ID
+        val uriPlaylist = Regex("""playlist:([a-zA-Z0-9]+)""").find(url)
+        if (uriPlaylist != null) return SpotifyId(SpotifyType.PLAYLIST, uriPlaylist.groupValues[1])
+
+        val uriAlbum = Regex("""album:([a-zA-Z0-9]+)""").find(url)
+        if (uriAlbum != null) return SpotifyId(SpotifyType.ALBUM, uriAlbum.groupValues[1])
+
+        return null
+    }
+
+    /** Backward-compatible: extract playlist ID only */
+    fun extractPlaylistId(url: String): String? {
+        val id = extractSpotifyId(url) ?: return null
+        return if (id.type == SpotifyType.PLAYLIST) id.id else null
     }
 
     // ── Public API ──────────────────────────────────────────────────
 
     /**
-     * Extract playlist ID from a Spotify URL.
-     * Handles: open.spotify.com/playlist/ID, spotify:playlist:ID
+     * Fetch tracks from any Spotify URL (playlist or album).
      */
-    fun extractPlaylistId(url: String): String? {
-        // https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=...
-        val webMatch = Regex("""playlist/([a-zA-Z0-9]+)""").find(url)
-        if (webMatch != null) return webMatch.groupValues[1]
+    fun getTracks(url: String): List<TrackCandidate> {
+        val spotifyId = extractSpotifyId(url)
+        if (spotifyId == null) {
+            Log.e(TAG, "Could not extract Spotify ID from URL: $url")
+            return emptyList()
+        }
 
-        // spotify:playlist:37i9dQZF1DXcBWIGoYBM5M
-        val uriMatch = Regex("""playlist:([a-zA-Z0-9]+)""").find(url)
-        if (uriMatch != null) return uriMatch.groupValues[1]
+        Log.d(TAG, "Extracted ${spotifyId.type} ID: ${spotifyId.id}")
 
-        return null
+        return when (spotifyId.type) {
+            SpotifyType.PLAYLIST -> getPlaylistTracks(spotifyId.id)
+            SpotifyType.ALBUM -> getAlbumTracks(spotifyId.id)
+        }
     }
 
     /**
@@ -135,7 +198,7 @@ object SpotifyClient {
 
         while (url != null && tracks.size < 500) {
             val body = apiGet(url)
-            Log.d(TAG, "API response (first 500 chars): ${body.take(500)}")
+            Log.d(TAG, "Playlist API response (first 300 chars): ${body.take(300)}")
             val page = gson.fromJson(body, TracksPage::class.java)
             Log.d(TAG, "Parsed page: ${page.items?.size ?: 0} items, next=${page.next != null}")
 
@@ -164,4 +227,48 @@ object SpotifyClient {
         return tracks.take(500)
     }
 
+    /**
+     * Fetch all tracks from a Spotify album.
+     * Handles pagination automatically (up to 500 tracks).
+     */
+    fun getAlbumTracks(albumId: String): List<TrackCandidate> {
+        // First, get album metadata (for artwork)
+        val albumBody = apiGet("$API_BASE/albums/$albumId")
+        val album = gson.fromJson(albumBody, AlbumMetadata::class.java)
+        val albumThumb = album.images
+            ?.sortedByDescending { it.height ?: 0 }
+            ?.firstOrNull()?.url
+        val albumArtist = album.artists?.mapNotNull { it.name }?.joinToString(", ") ?: ""
+
+        Log.d(TAG, "Album: ${album.name}, artist: $albumArtist, thumb: $albumThumb")
+
+        val tracks = mutableListOf<TrackCandidate>()
+        var url: String? = "$API_BASE/albums/$albumId/tracks?limit=50"
+
+        while (url != null && tracks.size < 500) {
+            val body = apiGet(url)
+            Log.d(TAG, "Album tracks API response (first 300 chars): ${body.take(300)}")
+            val page = gson.fromJson(body, AlbumTracksPage::class.java)
+            Log.d(TAG, "Parsed album page: ${page.items?.size ?: 0} items, next=${page.next != null}")
+
+            page.items?.forEach { t ->
+                val name = t.name ?: return@forEach
+                val artist = t.artists?.mapNotNull { it.name }?.joinToString(", ") ?: albumArtist
+                val durationSec = t.durationMs?.let { it / 1000 }
+
+                tracks.add(TrackCandidate(
+                    title = name,
+                    artist = artist,
+                    durationSeconds = durationSec,
+                    thumbnailUrl = albumThumb,
+                    sourcePlatform = SourcePlatform.SPOTIFY
+                ))
+            }
+
+            url = page.next
+        }
+
+        Log.d(TAG, "Fetched ${tracks.size} tracks from album $albumId")
+        return tracks.take(500)
+    }
 }
