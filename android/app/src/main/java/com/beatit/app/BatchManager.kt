@@ -404,9 +404,10 @@ object BatchManager {
                     if (track.youtubeVideoId != null) {
                         Log.d(TAG, "⚡ Fast-match (already have URL): ${track.title}")
                         track.matchConfidence = 1.0
-                        transition(track.id, TrackStatus.MATCHED)
-                        transition(track.id, TrackStatus.QUEUED)
+                        track.status = TrackStatus.QUEUED
+                        track.updatedAt = System.currentTimeMillis()
                         dao.updateTrack(track)
+                        Log.d(TAG, "✓ Queued: ${track.title} -> ${track.status}")
                         return@async
                     }
                     
@@ -414,20 +415,25 @@ object BatchManager {
                     searchSemaphore.acquire()
                     try {
                         Log.d(TAG, "🔍 Searching YouTube for: ${track.title} ${track.artist}")
-                        transition(track.id, TrackStatus.MATCHING)
+                        track.status = TrackStatus.MATCHING
+                        track.updatedAt = System.currentTimeMillis()
+                        dao.updateTrack(track)
+                        
                         val (videoId, confidence) = TrackMapper.mapTrack(track, dao, youtubeHelper)
                         track.youtubeVideoId = videoId
                         track.matchConfidence = confidence
+                        
                         if (videoId == null) {
-                            transition(track.id, TrackStatus.FAILED)
+                            track.status = TrackStatus.FAILED
                             track.errorCode = "No match found"
                         } else if (confidence < 0.75) {
-                            transition(track.id, TrackStatus.MATCHED_LOW_CONFIDENCE)
+                            track.status = TrackStatus.MATCHED_LOW_CONFIDENCE
                         } else {
-                            transition(track.id, TrackStatus.MATCHED)
-                            transition(track.id, TrackStatus.QUEUED)
+                            track.status = TrackStatus.QUEUED
                         }
+                        track.updatedAt = System.currentTimeMillis()
                         dao.updateTrack(track)
+                        Log.d(TAG, "✓ Matched: ${track.title} -> ${track.status}")
                     } finally {
                         searchSemaphore.release()
                     }
