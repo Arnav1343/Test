@@ -173,7 +173,7 @@ class YoutubeHelper {
         private const val CACHE_TTL_MS = 3600_000L // 1 hour
         private val streamCache = ConcurrentHashMap<String, CachedStream>()
         private val pendingFetches = ConcurrentHashMap<String, Future<String?>>()
-        private val prefetchExecutor = Executors.newSingleThreadExecutor()
+        private val prefetchExecutor = Executors.newFixedThreadPool(3)
     }
 }
 
@@ -183,8 +183,12 @@ class YoutubeHelper {
 class OkHttpDownloader private constructor() : Downloader() {
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
+        .connectionPool(okhttp3.ConnectionPool(5, 60, TimeUnit.SECONDS))
+        .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .protocols(listOf(okhttp3.Protocol.HTTP_2, okhttp3.Protocol.HTTP_1_1))
         .build()
 
     override fun execute(request: Request): Response {
