@@ -3,6 +3,8 @@ package com.beatit.app
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -25,7 +27,7 @@ object BatchManager {
 
     private val executor = Executors.newFixedThreadPool(MAX_CONCURRENT_DOWNLOADS)
     private val activeWorkerCount = AtomicInteger(0)
-    private val lock = Any()
+    private val mutex = Mutex()
 
     private var isRecovering = false
     private var globalRateLimitUntil = 0L
@@ -80,7 +82,7 @@ object BatchManager {
     }
 
     private suspend fun dispatchNextIfPossible() {
-        synchronized(lock) {
+        mutex.withLock {
             CoroutineScope(Dispatchers.IO).launch {
                 val nextTrack = dao.getQueuedTracks().firstOrNull() ?: return@launch
                 
@@ -212,7 +214,7 @@ object BatchManager {
     private fun runRecovery() {
         isRecovering = true
         CoroutineScope(Dispatchers.IO).launch {
-            synchronized(lock) {
+            mutex.withLock {
                 try {
                     val stalled = dao.getStalledTracks()
                     stalled.forEach { track ->
@@ -221,7 +223,7 @@ object BatchManager {
                         dao.updateTrack(track)
                     }
                 } catch (e: Exception) {
-                    Log.error(TAG, "Recovery failed", e)
+                    Log.e(TAG, "Recovery failed", e)
                 } finally {
                     isRecovering = false
                     activeWorkerCount.set(0)
@@ -247,7 +249,7 @@ object BatchManager {
     }
 
     suspend fun transition(trackId: String, nextStatus: TrackStatus) {
-        synchronized(lock) {
+        mutex.withLock {
             val track = dao.getTrack(trackId) ?: return
             if (isValidTransition(track.status, nextStatus)) {
                 transitionInternal(track, nextStatus)
