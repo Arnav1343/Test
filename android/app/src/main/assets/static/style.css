@@ -1717,6 +1717,22 @@ body {
   margin-left: 8px;
 }
 
+.batch-item-progress {
+  height: 3px;
+  background: var(--input-bg);
+  border-radius: 2px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+
+.batch-item-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+
 /* ─── Batch Detail ───────────────────────────────────────────── */
 .batch-detail-header {
   display: flex;

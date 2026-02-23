@@ -538,21 +538,50 @@
             const r = await fetch('/api/import/list');
             batches = await r.json();
             renderBatches();
-            $('#batchBadge').textContent = batches.filter(b => b.state === 'DOWNLOADING' || b.state === 'AWAITING_USER').length || '';
+            const activeBatchCount = batches.filter(b => b.state === 'DOWNLOADING' || b.state === 'AWAITING_USER').length;
+            const totalActive = activeBatchCount + (activeDownloadTaskId ? 1 : 0);
+            const badge = $('#batchBadge');
+            if (badge) badge.textContent = totalActive || '';
         } catch { }
     }
 
+
     function renderBatches() {
-        if (!batches.length) { $('#batchList').innerHTML = '<div class="library-empty">No imports.</div>'; return; }
-        $('#batchList').innerHTML = batches.map((b, i) => {
-            const pct = b.totalTracks > 0 ? (b.completedCount / b.totalTracks * 100).toFixed(0) : 0;
-            return `<div class="batch-item ${i === batchesIndex ? 'selected' : ''}" data-id="${b.id}">
-                <div class="batch-item-title">Batch ${b.id.substring(0, 8)}</div>
-                <div class="batch-item-meta"><span>${b.state}</span><span>${b.completedCount}/${b.totalTracks} songs</span></div>
-                <div class="batch-item-progress"><div class="batch-item-fill" style="width: ${pct}%"></div></div>
+        let html = '';
+
+        // Show active single-song download if one exists
+        if (activeDownloadTaskId) {
+            html += `<div class="batch-item">
+                <div class="batch-item-info">
+                    <div class="batch-item-title">${escH(activeDownloadTitle || 'Downloading...')}</div>
+                    <div class="batch-item-meta"><span>DOWNLOADING</span><span>Single song</span></div>
+                </div>
             </div>`;
-        }).join('');
+        }
+
+        // Show batch imports
+        if (batches.length) {
+            html += batches.map((b, i) => {
+                const pct = b.totalTracks > 0 ? (b.completedCount / b.totalTracks * 100).toFixed(0) : 0;
+                const adjustedIdx = activeDownloadTaskId ? i + 1 : i;
+                return `<div class="batch-item ${adjustedIdx === batchesIndex ? 'selected' : ''}" data-id="${b.id}">
+                    <div class="batch-item-info">
+                        <div class="batch-item-title">Batch ${b.id.substring(0, 8)}</div>
+                        <div class="batch-item-meta"><span>${b.state}</span><span>${b.completedCount}/${b.totalTracks} songs</span></div>
+                        <div class="batch-item-progress"><div class="batch-item-fill" style="width: ${pct}%"></div></div>
+                    </div>
+                    <span class="batch-item-arrow">›</span>
+                </div>`;
+            }).join('');
+        }
+
+        if (!html) {
+            html = '<div class="library-empty">No active downloads.</div>';
+        }
+
+        $('#batchList').innerHTML = html;
     }
+
 
     async function refreshBatchDetail() {
         if (!activeBatchId) return;
